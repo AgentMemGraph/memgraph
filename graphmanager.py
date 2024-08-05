@@ -9,7 +9,8 @@ from langchain_experimental.graph_transformers import LLMGraphTransformer
 from langchain_openai import ChatOpenAI
 from openai import OpenAI
 import numpy as np
-
+import chromadb
+from chromadb.config import Settings
 
 class Node:
     def __init__(self, id, node_type):
@@ -25,20 +26,27 @@ class Relationship:
 
 
 class GraphManager:
-    def __init__(self, filename='graph2.pkl'):
+    def __init__(self, filename='graph2.pkl', embedding_db_path='./graph_embedding_db'):
         self.filename = filename
         self.graph = self.load_graph()
         self.llm = ChatOpenAI(temperature=0, model_name="gpt-4-turbo")
         self.llm_transformer = LLMGraphTransformer(llm=self.llm)
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         self.model = BertModel.from_pretrained('bert-base-uncased')
-
+        self.chroma_client = chromadb.Client(
+            Settings(persist_directory=embedding_db_path))
+        self.node_collection = self.chroma_client.get_or_create_collection(
+            "node_embeddings")
+        self.relationship_collection = self.chroma_client.get_or_create_collection(
+            "relationship_embeddings")
+            
     def save_graph(self):
         """
         Saves the graph to a file using pickle.
         """
         with open(self.filename, 'wb') as f:
             pickle.dump(self.graph, f, pickle.HIGHEST_PROTOCOL)
+        # self.chroma_client.persist()
 
     def load_graph(self):
         """
@@ -48,13 +56,15 @@ class GraphManager:
             with open(self.filename, 'rb') as f:
                 return pickle.load(f)
         else:
-            return nx.DiGraph()
+            return nx.multiDIGraph()
 
     def clear_graph(self):
         """
         Clears all nodes and edges from the graph.
         """
         self.graph.clear()
+        self.node_collection.delete(delete_all=True)
+        self.relationship_collection.delete(delete_all=True)
         print("Graph has been cleared.")
 
     def add_documents(self, documents):
@@ -97,6 +107,37 @@ class GraphManager:
             outputs = self.model(**inputs)
         return outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
 
+    def add_node_embedding(self, node_id, node_type):
+        """
+        Adds a node embedding to ChromaDB.
+        """
+        text_representation = f"{node_id} ({node_type})"
+        embedding = self.encode_text(text_representation)
+        self.node_collection.add(
+            embeddings=[embedding.tolist()],
+            documents=[text_representation],
+            ids=[node_id]
+        )
+    
+    def add_relationship_embedding(self, source_id, target_id, relationship_type):
+        """
+        Adds a relationship embedding to ChromaDB.
+        """
+        text_representation = self.get_text_representation(Relationship(
+            source=Node(id=source_id, node_type=self.graph.nodes[source_id].get(
+                'type', 'unknown')),
+            target=Node(id=target_id, node_type=self.graph.nodes[target_id].get(
+                'type', 'unknown')),
+            relationship_type=relationship_type
+        ))
+        embedding = self.encode_text(text_representation)
+        relationship_id = f"{source_id}_{target_id}_{relationship_type}"
+        self.relationship_collection.add(
+            embeddings=[embedding.tolist()],
+            documents=[text_representation],
+            ids=[relationship_id]
+        )
+
     def get_text_representation(self, relationship):
         """
         Creates a detailed textual representation for a relationship.
@@ -126,32 +167,73 @@ class GraphManager:
             relationship_texts[(source, target)] = text_representation
         return relationship_texts
 
+    def get_all_relationships(self):
+        """
+        Retrieves all relationships in the graph.
+        """
+        relationships = []
+        for source, target, data in self.graph.edges(data=True):
+            relationships.append((
+                source,
+                target,
+                {'type': data.get('type', 'unknown')}
+            ))
+        return relationships
+    
+    # def find_similar_relationships(self, new_relationship, threshold=0.8):
+    #     """
+    #     Finds existing relationships in the graph that are similar to a new relationship.
+    #     """
+    #     similar_relationships = []
+    #     new_text = self.get_text_representation(new_relationship)
+    #     new_embedding = self.encode_text(new_text)
+
+    #     for source, target, data in self.graph.edges(data=True):
+    #         source_node_data = self.graph.nodes[source]
+    #         target_node_data = self.graph.nodes[target]
+
+    #         source_node = Node(
+    #             id=source, node_type=source_node_data.get('type', 'unknown'))
+    #         target_node = Node(
+    #             id=target, node_type=target_node_data.get('type', 'unknown'))
+
+    #         relationship = Relationship(
+    #             source=source_node, target=target_node, relationship_type=data.get('type', 'unknown'))
+    #         existing_text = self.get_text_representation(relationship)
+    #         existing_embedding = self.encode_text(existing_text)
+    #         similarity = 1 - cosine(new_embedding, existing_embedding)
+
+    #         if similarity > threshold:
+    #             similar_relationships.append(
+    #                 (source, target, data, similarity))
+
+    #     return similar_relationships
+    
     def find_similar_relationships(self, new_relationship, threshold=0.8):
         """
         Finds existing relationships in the graph that are similar to a new relationship.
         """
-        similar_relationships = []
         new_text = self.get_text_representation(new_relationship)
         new_embedding = self.encode_text(new_text)
 
-        for source, target, data in self.graph.edges(data=True):
-            source_node_data = self.graph.nodes[source]
-            target_node_data = self.graph.nodes[target]
+        results = self.relationship_collection.query(
+            query_embeddings=[new_embedding.tolist()],
+            n_results=10
+        )
 
-            source_node = Node(
-                id=source, node_type=source_node_data.get('type', 'unknown'))
-            target_node = Node(
-                id=target, node_type=target_node_data.get('type', 'unknown'))
-
-            relationship = Relationship(
-                source=source_node, target=target_node, relationship_type=data.get('type', 'unknown'))
-            existing_text = self.get_text_representation(relationship)
-            existing_embedding = self.encode_text(existing_text)
-            similarity = 1 - cosine(new_embedding, existing_embedding)
-
+        similar_relationships = []
+        for i, relationship_id in enumerate(results['ids'][0]):
+            similarity = 1 - cosine(new_embedding,
+                                    np.array(results['embeddings'][0][i]))
             if similarity > threshold:
-                similar_relationships.append(
-                    (source, target, data, similarity))
+                source_id, target_id, relationship_type = relationship_id.split(
+                    '_')
+                similar_relationships.append((
+                    source_id,
+                    target_id,
+                    {'type': relationship_type},
+                    similarity
+                ))
 
         return similar_relationships
 
@@ -274,43 +356,91 @@ class GraphManager:
 
         return added_nodes, added_relationships
 
+    def get_node_edges(self, node):
+        return list(self.graph.edges(node, data = True))
 
-
-
+    def get_edge_between_nodes(self, source_node, target_node):
+        """
+        Returns the edge data if the two nodes are connected, or None if they aren't.
+        
+        :param source_node: The ID of the source node
+        :param target_node: The ID of the target node
+        :return: A Relationship object if the nodes are connected, or None if they aren't
+        """
+        if self.graph.has_edge(source_node, target_node):
+            edge_data = self.graph.get_edge_data(source_node, target_node)
+            return (source_node, target_node, {'type': edge_data.get('type', 'unknown')})
+        else:
+            return None
 
 # Example usage:
 if __name__ == "__main__":
     manager = GraphManager()
 
-    # Add documents to the graph
-    documents = [
-        "The Great Wall of China is in China.",
-        "The Great Wall of China is in Asia.",
-        "The Great Wall of China is a historical landmark.",
-        "The Great Wall of China is in China.",
-        "The Great Wall of China is in China.",
-        "The Pacific Ocean is the largest ocean on Earth.",
-        "The Mona Lisa is a famous painting.",
-        "The Great Wall of China is in China.",
-        "The Great Wall of China was built to protect against invasions.",
-        "The Great Wall of China is an architectural marvel.",
-        "The Louvre is a famous museum.",
-        "The Louvre is in Paris, France.",
-        "The Eiffel Tower was the tallest man-made structure until 1930.",
-        "The Eiffel Tower was the tallest man-made structure until the Chrysler Building was completed in 1930.",
-        "The Eiffel Tower is a famous Parisian landmark.",
-        "The Eiffel Tower was used in various films."
+    texts = [
+        "John went to the park today and met his old friend, Sarah.",
+        "In the afternoon, John attended a meeting with his boss about the upcoming project.",
+        "John wrote in his diary about feeling anxious before his presentation tomorrow.",
+        "Sarah told John about her plans to travel to Europe next summer.",
+        "John decided to start a new hobby—painting landscapes.",
+        "After the meeting, John had dinner with his colleague, James.",
+        "John's sister called to inform him about the family reunion next month.",
+        "John spent the evening reading a book on mindfulness.",
+        "John helped his neighbor fix a flat tire on their car.",
+        "John received an invitation to his high school reunion.",
+        "John and Sarah went hiking over the weekend.",
+        "John felt relieved after finishing his project ahead of the deadline.",
+        "John's dog, Max, was not feeling well, so he took him to the vet.",
+        "John attended a webinar on digital marketing strategies.",
+        "John ran into an old classmate at the grocery store.",
+        "John spent the weekend at a cabin in the mountains.",
+        "John's boss praised him for his hard work on the recent project.",
+        "John bought a new set of paints to explore his artistic side.",
+        "John and James discussed their favorite books over lunch.",
+        "John spent the afternoon organizing his workspace.",
+        "John visited a local art gallery to find inspiration for his paintings.",
+        "John's parents sent him a care package with his favorite snacks.",
+        "John had a long conversation with Sarah about their future plans.",
+        "John was thrilled to receive a promotion at work.",
+        "John took Max for a walk in the nearby nature reserve.",
+        "John tried a new recipe for dinner and was happy with the results.",
+        "John attended a yoga class to help reduce stress.",
+        "John and Sarah watched a documentary on wildlife conservation.",
+        "John volunteered at a local charity event over the weekend.",
+        "John was invited to speak at a conference about his work.",
+        "John bought tickets to a concert happening next month.",
+        "John's sister visited him for the weekend, and they spent time reminiscing.",
+        "John and his friends planned a weekend getaway to the beach.",
+        "John was nervous about an upcoming presentation at work.",
+        "John took a day off to spend time painting in his studio.",
+        "John attended a networking event and made several new connections.",
+        "John had a productive day and completed all his tasks ahead of time.",
+        "John visited a new coffee shop that opened in his neighborhood.",
+        "John decided to start journaling every night before bed.",
+        "John and Sarah attended a wedding of a mutual friend.",
+        "John spent the afternoon researching new techniques for his paintings.",
+        "John was delighted to receive a surprise gift from Sarah.",
+        "John and James started working on a joint project at work.",
+        "John visited his parents for a family dinner.",
+        "John spent the evening catching up on his favorite TV series.",
+        "John's sister asked him to be the godfather to her newborn son.",
+        "John attended a photography workshop to improve his skills.",
+        "John took a long walk along the beach to clear his mind.",
+        "John and Sarah decided to plan a trip together next year.",
+        "John received positive feedback on his recent work from his team."
     ]
 
-    for document in documents:# Add the documents to the graph
-     manager.add_documents(document)
-# Add the documents to the do
-    # manager.add_documents(documents)
+    # for document in texts:# Add the documents to the graph
+    # for document in texts:
+
+    #     manager.add_documents(document)
 
     # Compare node similarity
     # similarity = manager.compare_node_similarity('node1', 'node2')
-    
-
     # Save the graph
     manager.save_graph()
-    print(manager.get_all_relationship_texts())
+    rels = (manager.get_all_relationships())
+    for rel in rels:
+        print(rel)
+    print(manager.get_node_edges('John'))
+    print(manager.get_edge_between_nodes('John', 'Sarah'))
