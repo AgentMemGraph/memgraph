@@ -2,12 +2,16 @@ from vectordb import ChromaDBManager
 from graphmanager import GraphManager
 import uuid
 import json
-
+import openai
+from openai import OpenAI
+client = OpenAI()
 
 class MemgraphMemory:
     def __init__(self, collection_name='all-my-documents', graph_filename='graph2.pkl'):
         self.db_manager = ChromaDBManager(collection_name)
-        self.graph_manager = GraphManager(filename=graph_filename)
+        chroma_client = self.db_manager.client
+        self.graph_manager = GraphManager(filename=graph_filename, chroma_client = chroma_client)
+        
         # self.graph_manager.clear_graph()
 
     def add(self, data, user_id=None, metadata=None):
@@ -69,13 +73,43 @@ class MemgraphMemory:
             "node_data": node_data
         }
 
+    def get_formatted_documents_and_metadatas(self,data):
+        documents = data.get('documents', [])
+        metadatas = data.get('metadatas', [])
+
+        # Format documents
+        formatted_documents = "Documents:\n" + \
+            "\n".join(f"- {doc}" for doc in documents[0])
+
+        # Format metadatas
+        formatted_metadatas = "Metadatas:\n"
+        for metadata in metadatas[0]:
+            edges = metadata.get('edges', 'No edges')
+            nodes = metadata.get('nodes', 'No nodes')
+            user_id = metadata.get('user_id', 'No user_id')
+
+            formatted_metadatas += f"\nUser ID: {user_id}\nEdges: {edges}\nNodes: {nodes}\n"
+
+        return f"{formatted_documents}\n{formatted_metadatas}"
     def search(self, query, user_id=None):
         """
         Search for memories based on a query in the vector store.
         """
+        prompt = "You will be given a text. Extract all entites from the text. Return your answer in the following json format: {\"entities\": [\"entity1\", \"entity2\", ...]}\n\nText: " + query
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"}
+        )
+
+        ner =  json.loads(response.choices[0].message.content)['entities']
+        graph_res = []
+        for entity in ner:
+            graph_res.append(self.graph_manager.get_node_edges(entity))
         results = self.db_manager.query(
             query_texts=[query], n_results=10)  # Adjust n_results as needed
-        return results
+        formatted_results = self.get_formatted_documents_and_metadatas(results)
+        return formatted_results,graph_res
 
     def update(self, memory_id, data):
         """

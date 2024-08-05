@@ -11,12 +11,11 @@ from openai import OpenAI
 import numpy as np
 import chromadb
 from chromadb.config import Settings
-
+import hashlib
 class Node:
     def __init__(self, id, node_type):
         self.id = id
         self.type = node_type
-
 
 class Relationship:
     def __init__(self, source, target, relationship_type):
@@ -24,21 +23,27 @@ class Relationship:
         self.target = target  # Instance of Node
         self.type = relationship_type
 
-
 class GraphManager:
-    def __init__(self, filename='graph2.pkl', embedding_db_path='./graph_embedding_db'):
+    def __init__(self, filename='graph.pkl', embedding_db_path='./graph_embedding_db', chroma_client = None):
         self.filename = filename
         self.graph = self.load_graph()
         self.llm = ChatOpenAI(temperature=0, model_name="gpt-4-turbo")
         self.llm_transformer = LLMGraphTransformer(llm=self.llm)
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         self.model = BertModel.from_pretrained('bert-base-uncased')
-        self.chroma_client = chromadb.Client(
-            Settings(persist_directory=embedding_db_path))
+        # self.chroma_client = chroma_client if chroma_client else chromadb.Client(
+        #     Settings(persist_directory=embedding_db_path))
+        self.chroma_client =chromadb.PersistentClient(
+            path=embedding_db_path)
+
+
         self.node_collection = self.chroma_client.get_or_create_collection(
             "node_embeddings")
         self.relationship_collection = self.chroma_client.get_or_create_collection(
             "relationship_embeddings")
+        # collection = self.chroma_client.get_collection(
+        #     name="relationship_embeddings")
+        print(self.relationship_collection.get())
             
     def save_graph(self):
         """
@@ -56,7 +61,7 @@ class GraphManager:
             with open(self.filename, 'rb') as f:
                 return pickle.load(f)
         else:
-            return nx.multiDIGraph()
+            return nx.MultiDiGraph()
 
     def clear_graph(self):
         """
@@ -73,6 +78,7 @@ class GraphManager:
         """
         nodes, relationships = self.process_text_to_graph(documents)
         added_nodes, added_relationships = self.update_graph_with_new_data(nodes, relationships)
+        self.save_graph()
         return added_nodes, added_relationships
 
     def process_text_to_graph(self, text):
@@ -118,7 +124,7 @@ class GraphManager:
             documents=[text_representation],
             ids=[node_id]
         )
-    
+        
     def add_relationship_embedding(self, source_id, target_id, relationship_type):
         """
         Adds a relationship embedding to ChromaDB.
@@ -131,12 +137,17 @@ class GraphManager:
             relationship_type=relationship_type
         ))
         embedding = self.encode_text(text_representation)
+        # print(embedding.tolist())
+        embedding = embedding.tolist()
         relationship_id = f"{source_id}_{target_id}_{relationship_type}"
-        self.relationship_collection.add(
-            embeddings=[embedding.tolist()],
+        x= self.relationship_collection.add(
+            embeddings=[embedding],
             documents=[text_representation],
             ids=[relationship_id]
         )
+        print('added relationship embedding')
+        # print(x)
+        print(self.relationship_collection.get())
 
     def get_text_representation(self, relationship):
         """
@@ -218,22 +229,28 @@ class GraphManager:
 
         results = self.relationship_collection.query(
             query_embeddings=[new_embedding.tolist()],
-            n_results=10
+            n_results=10,
+            include = ['embeddings']
         )
-
+        # print(results)
+        print(results)
+        print(self.relationship_collection.get())
         similar_relationships = []
         for i, relationship_id in enumerate(results['ids'][0]):
             similarity = 1 - cosine(new_embedding,
                                     np.array(results['embeddings'][0][i]))
             if similarity > threshold:
-                source_id, target_id, relationship_type = relationship_id.split(
-                    '_')
-                similar_relationships.append((
-                    source_id,
-                    target_id,
-                    {'type': relationship_type},
-                    similarity
-                ))
+                try:
+                    source_id, target_id, relationship_type = relationship_id.split(
+                        '_')
+                    similar_relationships.append((
+                        source_id,
+                        target_id,
+                        {'type': relationship_type},
+                        similarity
+                    ))
+                except Exception as e:
+                    print(e,relationship_id)
 
         return similar_relationships
 
@@ -265,7 +282,7 @@ class GraphManager:
         return response.choices[0].message.content
 
 
-    def update_graph_with_new_data(self, nodes, relationships):
+    # def update_graph_with_new_data(self, nodes, relationships):
         """
         Updates the graph with new nodes and relationships, removing duplicates.
         Returns the Node and Relationship objects that were actually added.
@@ -277,6 +294,7 @@ class GraphManager:
         for node in nodes:
             if not self.graph.has_node(node.id):
                 self.graph.add_node(node.id, type=node.type)
+                self.add_node_embedding(node.id, node.type)
                 # Create and add the Node object
                 added_nodes.append(Node(id=node.id, node_type=node.type))
 
@@ -289,6 +307,8 @@ class GraphManager:
             if not similar_relationships:
                 self.graph.add_edge(
                     relationship.source.id, relationship.target.id, type=relationship.type)
+                self.add_relationship_embedding(
+                    relationship.source.id, relationship.target.id, relationship.type)
                 # Create and add the Relationship object
                 added_relationships.append(Relationship(
                     source=Node(id=relationship.source.id, node_type=self.graph.nodes[relationship.source.id].get(
@@ -308,14 +328,19 @@ class GraphManager:
                     )
                     action = self.resolve_conflict_with_llm(
                         existing_relationship, relationship)
+                    
                     print(existing_relationship, relationship)
                     print()
                     print('action:', action)
                     print()
                     if 'update' in action.lower():
                         self.graph.remove_edge(similar[0], similar[1])
-                        self.graph.add_edge(
-                            relationship.source.id, relationship.target.id, type=relationship.type)
+                        self.delete_relationship_embedding(
+                            similar[0], similar[1], similar[2].get('type', 'unknown'))  # Add this line
+                        self.graph.add_edge(relationship.source.id,
+                                            relationship.target.id, type=relationship.type)
+                        self.add_relationship_embedding(
+                            relationship.source.id, relationship.target.id, relationship.type)
                         added_relationships.append(Relationship(
                             source=Node(id=relationship.source.id, node_type=self.graph.nodes[relationship.source.id].get(
                                 'type', 'unknown')),
@@ -327,6 +352,8 @@ class GraphManager:
                     elif 'merge' in action.lower():
                         self.graph.add_edge(
                             relationship.source.id, relationship.target.id, type=relationship.type)
+                        self.add_relationship_embedding(
+                            relationship.source.id, relationship.target.id, relationship.type)
                         added_relationships.append(Relationship(
                             source=Node(id=relationship.source.id, node_type=self.graph.nodes[relationship.source.id].get(
                                 'type', 'unknown')),
@@ -341,6 +368,8 @@ class GraphManager:
                     elif 'not-connected' in action.lower():
                         self.graph.add_edge(
                             relationship.source.id, relationship.target.id, type=relationship.type)
+                        self.add_relationship_embedding(
+                            relationship.source.id, relationship.target.id, relationship.type)
                         added_relationships.append(Relationship(
                             source=Node(id=relationship.source.id, node_type=self.graph.nodes[relationship.source.id].get(
                                 'type', 'unknown')),
@@ -356,8 +385,87 @@ class GraphManager:
 
         return added_nodes, added_relationships
 
+    def update_graph_with_new_data(self, nodes, relationships):
+        """
+        Updates the graph with new nodes and relationships, removing duplicates.
+        Returns the Node and Relationship objects that were actually added.
+        """
+        added_nodes = []
+        added_relationships = []
+        processed_relationships = set()
+
+        for node in nodes:
+            if not self.graph.has_node(node.id):
+                self.graph.add_node(node.id, type=node.type)
+                self.add_node_embedding(node.id, node.type)
+                added_nodes.append(Node(id=node.id, node_type=node.type))
+
+        for relationship in relationships:
+            if (relationship.source.id, relationship.target.id, relationship.type) in processed_relationships:
+                continue
+
+            similar_relationships = self.find_similar_relationships(relationship)
+            should_add = True
+
+            if similar_relationships:
+                for similar in similar_relationships:
+                    existing_relationship = Relationship(
+                        source=Node(id=similar[0], node_type=self.graph.nodes[similar[0]].get(
+                            'type', 'unknown')),
+                        target=Node(id=similar[1], node_type=self.graph.nodes[similar[1]].get(
+                            'type', 'unknown')),
+                        relationship_type=similar[2].get('type', 'unknown')
+                    )
+                    action = self.resolve_conflict_with_llm(
+                        existing_relationship, relationship)
+
+                    print(existing_relationship, relationship)
+                    print()
+                    print('action:', action)
+                    print()
+
+                    if 'update' in action.lower():
+                        self.graph.remove_edge(similar[0], similar[1])
+                        self.delete_relationship_embedding(
+                            similar[0], similar[1], similar[2].get('type', 'unknown'))
+                        break  # Exit the loop to add the new relationship
+                    elif 'merge' in action.lower():
+                        # Merge logic (if needed)
+                        break  # Exit the loop to add the new relationship
+                    elif 'discard' in action.lower():
+                        should_add = False
+                        break  # Exit the loop and don't add the new relationship
+                    elif 'not-connected' in action.lower():
+                        continue  # Check the next similar relationship
+                    else:
+                        print("Unknown action:", action)
+                        should_add = False
+                        break  # Exit the loop and don't add the new relationship
+
+            if should_add:
+                print("hi")
+                self.graph.add_edge(relationship.source.id,
+                                    relationship.target.id, type=relationship.type)
+                self.add_relationship_embedding(
+                    relationship.source.id, relationship.target.id, relationship.type)
+                added_relationships.append(Relationship(
+                    source=Node(id=relationship.source.id, node_type=self.graph.nodes[relationship.source.id].get(
+                        'type', 'unknown')),
+                    target=Node(id=relationship.target.id, node_type=self.graph.nodes[relationship.target.id].get(
+                        'type', 'unknown')),
+                    relationship_type=relationship.type
+                ))
+
+            processed_relationships.add(
+                (relationship.source.id, relationship.target.id, relationship.type))
+
+        return added_nodes, added_relationships
+    
     def get_node_edges(self, node):
-        return list(self.graph.edges(node, data = True))
+        edges = self.graph.edges(node, data=True)
+        formatted_edges = [(source, edge_data.get('type', 'unknown'), target)
+                        for source, target, edge_data in edges]
+        return formatted_edges
 
     def get_edge_between_nodes(self, source_node, target_node):
         """
@@ -375,7 +483,7 @@ class GraphManager:
 
 # Example usage:
 if __name__ == "__main__":
-    manager = GraphManager()
+    manager = GraphManager(filename='graph5.pkl', embedding_db_path='./graph_embedding_db5')
 
     texts = [
         "John went to the park today and met his old friend, Sarah.",
@@ -430,7 +538,8 @@ if __name__ == "__main__":
         "John received positive feedback on his recent work from his team."
     ]
 
-    # for document in texts:# Add the documents to the graph
+    # /manager.add_documents("John's Team liked John's recent work")
+
     # for document in texts:
 
     #     manager.add_documents(document)
@@ -439,8 +548,13 @@ if __name__ == "__main__":
     # similarity = manager.compare_node_similarity('node1', 'node2')
     # Save the graph
     manager.save_graph()
+
     rels = (manager.get_all_relationships())
     for rel in rels:
         print(rel)
-    print(manager.get_node_edges('John'))
+    x = (manager.get_node_edges('John'))
+    for j in x:
+        print(j)
     print(manager.get_edge_between_nodes('John', 'Sarah'))
+    
+    

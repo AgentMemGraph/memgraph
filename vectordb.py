@@ -4,10 +4,13 @@ import chromadb
 class ChromaDBManager:
     def __init__(self, collection_name):
         # Initialize ChromaDB client
-        self.client = chromadb.Client()
+        self.client = chromadb.PersistentClient(path="text_documents/")
         self.collection_name = collection_name
         self.collection = self._get_or_create_collection()
+        
 
+    def get_client(self):
+        return self.client
     def _get_or_create_collection(self):
         try:
             # Attempt to get the collection, create it if it does not exist
