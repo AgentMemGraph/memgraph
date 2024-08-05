@@ -84,7 +84,6 @@ class GraphManager:
         # self.graph = self.load_graph()
 
         nodes, relationships = self.process_text_to_graph(documents)
-        print(nodes,relationships)
         added_nodes, added_relationships = self.update_graph_with_new_data(nodes, relationships)
         self.save_graph()
         
@@ -464,12 +463,10 @@ class GraphManager:
         
         for relationship in relationships:
             if (relationship.source.id, relationship.target.id, relationship.type) in processed_relationships:
-                print("AAAAAAAA", relationship)
                 continue
             
             similar_relationships = self.find_similar_relationships(relationship)
             should_add = True
-            print("C: ",relationship, "D: ",similar_relationships)
             if similar_relationships:
                 for similar in similar_relationships:
                     try:
@@ -488,10 +485,10 @@ class GraphManager:
                         )
                     action = self.resolve_conflict_with_llm(
                         existing_relationship, relationship)
-                    print("A: ",similar, "B: :",relationship)
-                    print()
-                    print('action:', action)
-                    print()
+                    # print("A: ",similar, "B: :",relationship)
+                    # print()
+                    # print('action:', action)
+                    # print()
 
 
                     if 'replace-existing' in action.lower() or 'retain-existing' in action.lower():

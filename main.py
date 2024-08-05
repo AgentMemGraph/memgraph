@@ -8,7 +8,7 @@ client = OpenAI()
 
 ds = load_dataset("lucadiliello/hotpotqa")
 train_ds = ds["train"]
-for i in range(10):
+for i in range(20,30):
     m.graph_manager.clear_graph()
     question = train_ds[i]["question"]
     context = train_ds[i]["context"]
@@ -25,7 +25,7 @@ for i in range(10):
     related_memories1 = m.search_only_graph(query=question, user_id="gabe")
     pprint("Related Memories for Query: \n" + str(related_memories1))
     prompt = (
-        f"You are given a query and information that can be used to answer the query. Answer the Query. There are also a set of Entity Triplets given. Use those to make inferences. The answer may not be direct. Query: {question} \n Information: {related_memories1} Answer: ")
+        f"You are given a query and information that can be used to answer the query. Answer the Query. There are also a set of Entity Triplets given. Use those to make inferences. The answer may not be direct. Do not use your own knowledge, only use answer using the Information provided. \n Query: {question} \n Information: {related_memories1} Answer: ")
     
     response = client.chat.completions.create(
         model="gpt-4o-mini",
