@@ -12,10 +12,14 @@ import numpy as np
 import chromadb
 from chromadb.config import Settings
 import hashlib
+import json
+from create_kg import create_graph
+
 class Node:
     def __init__(self, id, node_type):
         self.id = id
         self.type = node_type
+
 
 class Relationship:
     def __init__(self, source, target, relationship_type):
@@ -23,8 +27,9 @@ class Relationship:
         self.target = target  # Instance of Node
         self.type = relationship_type
 
+
 class GraphManager:
-    def __init__(self, filename='graph.pkl', embedding_db_path='./graph_embedding_db', chroma_client = None):
+    def __init__(self, filename='graph.pkl', embedding_db_path='./graph_embedding_db', chroma_client=None):
         self.filename = filename
         self.graph = self.load_graph()
         self.llm = ChatOpenAI(temperature=0, model_name="gpt-4-turbo")
@@ -33,9 +38,8 @@ class GraphManager:
         self.model = BertModel.from_pretrained('bert-base-uncased')
         # self.chroma_client = chroma_client if chroma_client else chromadb.Client(
         #     Settings(persist_directory=embedding_db_path))
-        self.chroma_client =chromadb.PersistentClient(
+        self.chroma_client = chromadb.PersistentClient(
             path=embedding_db_path)
-
 
         self.node_collection = self.chroma_client.get_or_create_collection(
             "node_embeddings")
@@ -44,7 +48,7 @@ class GraphManager:
         # collection = self.chroma_client.get_collection(
         #     name="relationship_embeddings")
         # print(self.relationship_collection.get())
-            
+
     def save_graph(self):
         """
         Saves the graph to a file using pickle.
@@ -77,26 +81,52 @@ class GraphManager:
             "relationship_embeddings")
         print("Graph has been cleared.")
 
-    def add_documents(self, documents):
+    def add_documents(self, documents, update = True):
         """
         Converts documents to graph nodes and relationships.
         """
         # self.graph = self.load_graph()
 
         nodes, relationships = self.process_text_to_graph(documents)
-        added_nodes, added_relationships = self.update_graph_with_new_data(nodes, relationships)
+        if not update: 
+            added_nodes, added_relationships = self.add_without_updating(
+                nodes, relationships)
+        else: #Default Case: Will Update
+            added_nodes, added_relationships = self.update_graph_with_new_data(
+                nodes, relationships)
         self.save_graph()
-        
+
         return added_nodes, added_relationships
+
+    def add_without_updating(self, nodes, relationships):
+        """
+        Adds nodes and relationships to the graph without updating or resolving conflicts.
+        """
+        for node in nodes:
+            if not self.graph.has_node(node.id):
+                self.graph.add_node(node.id, type=node.type)
+                self.add_node_embedding(node.id, node.type)
+
+        for relationship in relationships:
+            if not self.graph.has_edge(relationship.source.id, relationship.target.id):
+                self.graph.add_edge(
+                    relationship.source.id, relationship.target.id, type=relationship.type)
+                self.add_relationship_embedding(
+                    relationship.source.id, relationship.target.id, relationship.type)
+
+        return nodes, relationships
 
     def process_text_to_graph(self, text):
         """
         Converts text to a graph using LLM-based transformation.
         """
-        documents = [Document(page_content=text)]
-        graph_documents = self.llm_transformer.convert_to_graph_documents(
-            documents)
-        return graph_documents[0].nodes, graph_documents[0].relationships
+        # documents = [Document(page_content=text)]
+        # graph_documents = self.llm_transformer.convert_to_graph_documents(
+        #     documents)
+        # return graph_documents[0].nodes, graph_documents[0].relationships
+        nodes, relationships = create_graph(text)
+        return nodes, relationships
+        
 
     def create_node_edge_representation(self, node_id):
         """
@@ -132,7 +162,7 @@ class GraphManager:
             documents=[text_representation],
             ids=[node_id]
         )
-        
+
     def add_relationship_embedding(self, source_id, target_id, relationship_type):
         """
         Adds a relationship embedding to ChromaDB.
@@ -148,13 +178,11 @@ class GraphManager:
         # print(embedding.tolist())
         embedding = embedding.tolist()
         relationship_id = f"{source_id}|{target_id}|{relationship_type}"
-        x= self.relationship_collection.add(
+        x = self.relationship_collection.add(
             embeddings=[embedding],
             documents=[text_representation],
             ids=[relationship_id]
         )
-
-
 
     def print_chroma_embeddings(self):
         """
@@ -178,22 +206,20 @@ class GraphManager:
         else:
             print("No relationship embeddings found.")
 
-
     def delete_relationship_embedding(self, source_id, target_id, relationship_type):
         """
         Deletes a relationship embedding from ChromaDB.
         """
-        
+
         relationship_id = f"{source_id}_{target_id}_{relationship_type}"
 
         try:
             # Remove the relationship embedding from ChromaDB
             self.relationship_collection.delete(ids=[relationship_id])
-            
+
         except Exception as e:
             print(
                 f'Failed to delete relationship embedding for ID: {relationship_id}. Error: {str(e)}')
-        
 
     def get_text_representation(self, relationship):
         """
@@ -236,7 +262,7 @@ class GraphManager:
                 {'type': data.get('type', 'unknown')}
             ))
         return relationships
-    
+
     # def find_similar_relationships(self, new_relationship, threshold=0.8):
     #     """
     #     Finds existing relationships in the graph that are similar to a new relationship.
@@ -265,21 +291,20 @@ class GraphManager:
     #                 (source, target, data, similarity))
 
     #     return similar_relationships
-    
+
     def find_similar_relationships(self, new_relationship, threshold=0.8):
         """
         Finds existing relationships in the graph that are similar to a new relationship.
         """
         new_text = self.get_text_representation(new_relationship)
         new_embedding = self.encode_text(new_text)
-        
+
         results = self.relationship_collection.query(
             query_embeddings=[new_embedding.tolist()],
             n_results=10,
-            include = ['embeddings']
+            include=['embeddings']
         )
-       
-        
+
         # print(results)
         # print(results)
         # print(self.relationship_collection.get())
@@ -298,15 +323,16 @@ class GraphManager:
                         similarity
                     ))
                 except Exception as e:
-                    print(e,relationship_id)
+                    print(e, relationship_id)
 
         return similar_relationships
 
-    def resolve_conflict_with_llm(self, existing_relationship, new_relationship):
+    def resolve_conflict_with_llm(self, existing_relationships, new_relationship):
         """
         Resolves conflicts between an existing relationship and a new relationship using an LLM.
         """
-        existing_text = self.get_text_representation(existing_relationship)
+        existing_relationship_texts = [self.get_text_representation(
+            existing_relationship) for existing_relationship in existing_relationships]
         new_text = self.get_text_representation(new_relationship)
         # print(existing_text, new_text)
         # prompt = (
@@ -320,25 +346,34 @@ class GraphManager:
         #     "4. **Not Connected**: If the existing relationship and the new relationship are unrelated or refer to different entities or contexts.\n\n"
         #     "Please respond with one of the four options: 'update,' 'merge,' 'discard,' or 'not-connected'. Respond with only one word."
         # )
-        prompt = ("We have two relationships in a knowledge graph. Here are their descriptions:\n\n"
-                  f"Existing Relationship: {existing_text}\n\n"
+        # prompt = ("We have two relationships in a knowledge graph. Here are their descriptions:\n\n"
+        #           f"Existing Relationship: {existing_text}\n\n"
+        #           f"New Relationship: {new_text}\n\n"
+        #           "Please determine the appropriate action to take. Choose from one of the following options and provide a brief explanation:\n\n"
+        #           "1. **Retain Existing**: If the existing relationship is identical or similar to the new one, and the new relationship should not be added.\n\n"
+        #           "2. **Add Both**: If the new relationship complements the existing relationship, and both should be retained.\n\n"
+        #           "3. **Replace Existing**: If the new relationship conflicts with the existing relationship, and the existing relationship should be removed and replaced with the new one.\n\n"
+        #           "4. **Not Connected**: If the existing relationship and the new relationship are unrelated or refer to different entities or contexts.\n\n"
+        #           "Please respond with one of the four options: 'retain-existing,' 'add-both,' 'replace-existing,' or 'not-connected'. Respond with only one word.")
+
+        prompt = ("We have a list of relationships in a knowledge graph, and a new relationship to be added. Here are their descriptions:\n\n"
+                  f"Existing Relationship: {existing_relationship_texts}\n\n"
                   f"New Relationship: {new_text}\n\n"
-                  "Please determine the appropriate action to take. Choose from one of the following options and provide a brief explanation:\n\n"
+                  "Please determine the appropriate action to take for each existing relationship Choose from one of the following options and provide a brief explanation:\n\n"
                   "1. **Retain Existing**: If the existing relationship is identical or similar to the new one, and the new relationship should not be added.\n\n"
                   "2. **Add Both**: If the new relationship complements the existing relationship, and both should be retained.\n\n"
                   "3. **Replace Existing**: If the new relationship conflicts with the existing relationship, and the existing relationship should be removed and replaced with the new one.\n\n"
                   "4. **Not Connected**: If the existing relationship and the new relationship are unrelated or refer to different entities or contexts.\n\n"
-                  "Please respond with one of the four options: 'retain-existing,' 'add-both,' 'replace-existing,' or 'not-connected'. Respond with only one word.")
-
-       
+                  "5. You must respond with one of the four actions for each existing relationship: 'retain-existing,' 'add-both,' 'replace-existing,' or 'not-connected'. Respond with only one word."
+                  "You must respond in a JSON format as follows: {'response': [{'relationship':'existing_relationship','action': 'action'}, {'relationship':'existing_relationship','action': 'action'}, ...]}")
         client = OpenAI()
         response = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="gpt-4o-mini",
+            response_format={"type": "json_object"}
         )
-        # print(prompt, response.choices[0].message.content)
-        return response.choices[0].message.content
-
+        print(prompt, response.choices[0].message.content)
+        return json.loads(response.choices[0].message.content)
 
     # def update_graph_with_new_data(self, nodes, relationships):
         """
@@ -386,7 +421,7 @@ class GraphManager:
         #             )
         #             action = self.resolve_conflict_with_llm(
         #                 existing_relationship, relationship)
-                    
+
         #             print(existing_relationship, relationship)
         #             print()
         #             print('action:', action)
@@ -460,37 +495,36 @@ class GraphManager:
             else:
                 self.graph.nodes[node.id]['type'] = node.type
 
-        
         for relationship in relationships:
             if (relationship.source.id, relationship.target.id, relationship.type) in processed_relationships:
                 continue
-            
-            similar_relationships = self.find_similar_relationships(relationship)
+
+            similar_relationships = self.find_similar_relationships(
+                relationship)
             should_add = True
             if similar_relationships:
-                for similar in similar_relationships:
-                    try:
-                        existing_relationship = Relationship(
-                            source=Node(id=similar[0], node_type=self.graph.nodes[similar[0]].get(
-                                'type', 'unknown')),
-                            target=Node(id=similar[1], node_type=self.graph.nodes[similar[1]].get(
-                                'type', 'unknown')),
-                            relationship_type=similar[2].get('type', 'unknown')
-                        )
-                    except Exception as e:
-                        existing_relationship = Relationship(
-                            source=Node(id=similar[0], node_type='unknown'),
-                            target=Node(id=similar[1],node_type='unknown'),
-                            relationship_type=similar[2].get('type', 'unknown')
-                        )
-                    action = self.resolve_conflict_with_llm(
-                        existing_relationship, relationship)
-                    # print("A: ",similar, "B: :",relationship)
-                    # print()
-                    # print('action:', action)
-                    # print()
+                existing_relationships = [Relationship(
+                    source=Node(id=similar[0], node_type=self.graph.nodes[similar[0]].get(
+                        'type', 'unknown')),
+                    target=Node(id=similar[1], node_type=self.graph.nodes[similar[1]].get(
+                        'type', 'unknown')),
+                    relationship_type=similar[2].get('type', 'unknown')
+                ) for similar in similar_relationships]
+                actions = self.resolve_conflict_with_llm(
+                    existing_relationships, relationship)
 
+                if len(actions['response']) != len(similar_relationships):
+                    # Retry once
+                    actions = self.resolve_conflict_with_llm(
+                        existing_relationships, relationship)
 
+                    if len(actions['response']) != len(similar_relationships):
+                        raise ValueError(
+                            "Mismatch between the number of responses and similar relationships")
+
+                for i in range(len(actions['response'])):
+                    action = actions['response'][i].get('action', 'unknown')
+                    similar = similar_relationships[i]
                     if 'replace-existing' in action.lower() or 'retain-existing' in action.lower():
                         # Remove the existing relationship
                         try:
@@ -518,8 +552,57 @@ class GraphManager:
                         print("Unknown action:", action)
                         # should_add = False
                         break  # Exit the loop and don't add the new relationship
-                    
-                    
+
+                # for similar in similar_relationships:
+                #     try:
+                #         existing_relationship = Relationship(
+                #             source=Node(id=similar[0], node_type=self.graph.nodes[similar[0]].get(
+                #                 'type', 'unknown')),
+                #             target=Node(id=similar[1], node_type=self.graph.nodes[similar[1]].get(
+                #                 'type', 'unknown')),
+                #             relationship_type=similar[2].get('type', 'unknown')
+                #         )
+                #     except Exception as e:
+                #         existing_relationship = Relationship(
+                #             source=Node(id=similar[0], node_type='unknown'),
+                #             target=Node(id=similar[1],node_type='unknown'),
+                #             relationship_type=similar[2].get('type', 'unknown')
+                #         )
+                #     action = self.resolve_conflict_with_llm(
+                #         [existing_relationship], relationship)
+                #     # print("A: ",similar, "B: :",relationship)
+                #     # print()
+                #     # print('action:', action)
+                #     # print()
+
+                #     if 'replace-existing' in action.lower() or 'retain-existing' in action.lower():
+                #         # Remove the existing relationship
+                #         try:
+                #             # pass
+                #             self.graph.remove_edge(similar[0], similar[1])
+                #             self.delete_relationship_embedding(
+                #                 similar[0], similar[1], similar[2].get('type', 'unknown'))
+                #         except Exception as e:
+                #             # print("SIMILAR ", similar)
+                #             # print("Exception line 508")
+                #             # rels = self.get_all_relationships()
+                #             # for rel in rels:
+                #             #     print(rel)
+                #             print(e)
+                #         continue  # Exit the loop to add the new relationship
+
+                #     elif 'add-both' in action.lower():
+                #         # Add both relationships without removing the existing one
+                #         continue  # Exit the loop to add the new relationship
+
+                #     elif 'not-connected' in action.lower():
+                #         continue  # Check the next similar relationship
+
+                #     else:
+                #         print("Unknown action:", action)
+                #         # should_add = False
+                #         break  # Exit the loop and don't add the new relationship
+
             # print("Adding relationship", relationship)
             # print("ALL GRAPH NODES ", list(self.graph.nodes))
             # print(relationship.source.id,
@@ -541,7 +624,6 @@ class GraphManager:
                 (relationship.source.id, relationship.target.id, relationship.type))
 
         return added_nodes, added_relationships
-    
 
     def get_node_edges(self, node_id):
         """
@@ -552,22 +634,21 @@ class GraphManager:
 
         # Outgoing edges where the node is a source
         outgoing_edges = [(node_id, target, data)
-                        for target, data in self.graph[node_id].items()]
+                          for target, data in self.graph[node_id].items()]
 
         # Incoming edges where the node is a target
         incoming_edges = [(source, node_id, data)
-                        for source, data in self.graph.pred[node_id].items()]
+                          for source, data in self.graph.pred[node_id].items()]
 
         # Combine both outgoing and incoming edges
         all_edges = outgoing_edges + incoming_edges
 
         return all_edges
 
-
     def get_edge_between_nodes(self, source_node, target_node):
         """
         Returns the edge data if the two nodes are connected, or None if they aren't.
-        
+
         :param source_node: The ID of the source node
         :param target_node: The ID of the target node
         :return: A Relationship object if the nodes are connected, or None if they aren't
@@ -578,9 +659,11 @@ class GraphManager:
         else:
             return None
 
+
 # Example usage:
 if __name__ == "__main__":
-    manager = GraphManager(filename='graph20.pkl', embedding_db_path='./graph_embedding_db20')
+    manager = GraphManager(filename='graph20.pkl',
+                           embedding_db_path='./graph_embedding_db20')
 
     texts = [
         "John went to the park today and met his old friend, Sarah.",
@@ -656,5 +739,3 @@ if __name__ == "__main__":
     # for j in x:
     #     print(j)
     # print(manager.get_edge_between_nodes('John', 'Sarah'))
-    
-    

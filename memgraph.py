@@ -6,15 +6,17 @@ import openai
 from openai import OpenAI
 client = OpenAI()
 
+
 class MemgraphMemory:
     def __init__(self, collection_name='all-my-documents', graph_filename='graph.pkl'):
         self.db_manager = ChromaDBManager(collection_name)
         chroma_client = self.db_manager.client
-        self.graph_manager = GraphManager(filename=graph_filename, chroma_client = chroma_client)
-        
+        self.graph_manager = GraphManager(
+            filename=graph_filename, chroma_client=chroma_client)
+
         # self.graph_manager.clear_graph()
 
-    def add(self, data, user_id=None, metadata=None):
+    def add(self, data, user_id=None, metadata=None, update=True):
         """
         Add a new memory to both the vector store and the graph.
         """
@@ -26,8 +28,7 @@ class MemgraphMemory:
             raise ValueError("Data must be a string.")
 
         # Add to graph
-        nodes, edges = self.graph_manager.add_documents(data)
-       
+        nodes, edges = self.graph_manager.add_documents(data, update)
 
         # Include nodes and edges in the metadata
         metadata = metadata or {}
@@ -39,7 +40,6 @@ class MemgraphMemory:
             'edges': edges_json,
             'user_id': user_id
         })
-       
 
         # Add to vector store
         self.db_manager.add_documents(
@@ -54,7 +54,7 @@ class MemgraphMemory:
         """
         # Retrieve from vector store
         results = self.db_manager.get_all()
-        
+
         return results
 
     def get(self, memory_id):
@@ -73,7 +73,7 @@ class MemgraphMemory:
             "node_data": node_data
         }
 
-    def get_formatted_documents_and_metadatas(self,data,graph_res):
+    def get_formatted_documents_and_metadatas(self, data, graph_res):
         documents = data.get('documents', [])
         metadatas = data.get('metadatas', [])
 
@@ -81,7 +81,8 @@ class MemgraphMemory:
         formatted_documents = "Documents:\n" + \
             "\n".join(f"- {doc}" for doc in documents[0])
 
-        formatted_documents = formatted_documents + "\n\nGraph Results:\n" + "\n".join(f"- {doc}" for doc in graph_res)
+        formatted_documents = formatted_documents + "\n\nGraph Results:\n" + \
+            "\n".join(f"- {doc}" for doc in graph_res)
         # Format metadatas
         # formatted_metadatas = "Metadatas:\n"
         # for metadata in metadatas[0]:
@@ -91,7 +92,7 @@ class MemgraphMemory:
 
         #     formatted_metadatas += f"\nUser ID: {user_id}\nEdges: {edges}\nNodes: {nodes}\n"
         return f"{formatted_documents}"
-    
+
     def search(self, query, user_id=None):
         """
         Search for memories based on a query in the vector store.
@@ -106,15 +107,16 @@ class MemgraphMemory:
             response_format={"type": "json_object"}
         )
 
-        ner =  json.loads(response.choices[0].message.content)['entities']
+        ner = json.loads(response.choices[0].message.content)['entities']
         graph_res = []
         for entity in ner:
             graph_res.append(self.graph_manager.get_node_edges(entity))
-        
+
         results = self.db_manager.query(
             query_texts=[query], n_results=10)  # Adjust n_results as needed
-        formatted_results = self.get_formatted_documents_and_metadatas(results,graph_res)
-        
+        formatted_results = self.get_formatted_documents_and_metadatas(
+            results, graph_res)
+
         second_prompt = "You have been given a query and a set of related memories. Answer the query using the information provided in the related memories. Do you want further information from the Knowledge Graph? Response must be in JSON format as follows: If no: {\"response\": \"no\"} If yes: {\"response\": \"yes\", \"entities\": [\"entity1\", \"entity2\", ...]}\n\nQuery: " + query + "\n\nRelated Memories: " + formatted_results
         response = client.chat.completions.create(
             messages=[{"role": "user", "content": second_prompt}],
@@ -127,8 +129,9 @@ class MemgraphMemory:
             print(response['entities'])
             for entity in response['entities']:
                 graph_res.append(self.graph_manager.get_node_edges(entity))
-            formatted_results = self.get_formatted_documents_and_metadatas(results,graph_res)
-            
+            formatted_results = self.get_formatted_documents_and_metadatas(
+                results, graph_res)
+
         return formatted_results
 
     def search_only_graph(self, query, user_id=None, max_hops=4):
@@ -179,12 +182,9 @@ class MemgraphMemory:
         formatted_results = "\n\nGraph Results:\n" + \
             "\n".join(f"- {doc}" for doc in graph_res)
         print(f"AFTER INITIAL QUERY: {formatted_results}")
-
-        for hop in range(max_hops):
-            
-            # Analysis prompt
-            analysis_prompt = f"""
+        analysis_prompt = f"""
             You are an AI assistant tasked with determining if more information is needed to answer a query based on provided information from a Knowledge Graph.
+            The primary question is, "Do you have enough information to answer the query based on the provided information?"
             Query: {query}
             Current Information: {formatted_results}
             Allowed Entities: {all_nodes}
@@ -195,24 +195,35 @@ class MemgraphMemory:
             3. If you need additional information and more hops are allowed, specify which entities you need more details about.
             4. Only include entities that are in the Allowed Entities list and not in the Previously Used Entities list.
             5. If the current Information does not have enough information to answer the Query, you should request more information.
+            6. Do not use your own knowledge to try and answer the question. Ensure that if you answer 'no', the Current Information is enough to answer the Query. 
+            7. You should respond with your reasoning for your answer. This reasoning should be based on why you claim the current information can answer the query. 
+            8. You should also create a sub-query, a query which must be answered next, or a simplified version of the current query given the current information.
             Respond in JSON format as follows:
+            9. You may not output entities that are previously used. Hence, if you believe that the information may not be present, you may answer 'yes', i.e. if you believe all relevant entities have been accessed. 
             {{
                 "response": "yes" or "no",
-                "entities": ["entity1", "entity2", ...] (only if more information is needed, otherwise an empty list)
+                "entities": ["entity1", "entity2", ...] (only if more information is needed, otherwise an empty list),
+                "reasoning": "Reasoning for your response
+                "sub-query": "Sub-query to be answered
             }}
-            """
-
+        """
+        messages = []
+        for hop in range(max_hops):
+            # Analysis prompt
+            messages.append({"role": "user", "content": analysis_prompt})
             response = client.chat.completions.create(
-                messages=[{"role": "user", "content": analysis_prompt}],
+                messages=messages,
                 model="gpt-4o-mini",
                 response_format={"type": "json_object"}
             )
-
+            messages.append(
+                {"role": "assistant", "content": response.choices[0].message.content})
+            # messages.append
             response_data = json.loads(response.choices[0].message.content)
-
-            if response_data['response'] == 'no' or hop == max_hops - 1:
+            # print(response_data)
+            if response_data['response'] == 'yes' or hop == max_hops - 1:
                 print(f"Multi-hop search completed after {hop + 1} hops.")
-                
+
                 # return formatted_results, 'no', [], response_data['reasoning']
                 return formatted_results
 
@@ -222,8 +233,12 @@ class MemgraphMemory:
             for entity in response_data['entities']:
                 graph_res.append(self.graph_manager.graph.nodes[entity])
                 graph_res.append(self.graph_manager.get_node_edges(entity))
-            formatted_results += "\n" + "\n".join(f"- {doc}" for doc in graph_res)
-            
+            formatted_results += "\n" + \
+                "\n".join(f"- {doc}" for doc in graph_res)
+            new_entities = [
+                entity for entity in response_data['entities'] if entity not in used_entities]
+            used_entities.update(new_entities)
+
         return formatted_results, 'yes', response_data['entities'], response_data['reasoning']
     # def search_only_graph(self, query, user_id=None):
     #     """
@@ -233,8 +248,8 @@ class MemgraphMemory:
 
     #     # Enhanced first prompt
     #     entity_extraction_prompt = f"""
-    #     Analyze the following text and extract all relevant entities. Each entity should be specific and atomic, such as a Person, Location, Organization, Event, Concept, or Object. 
-        
+    #     Analyze the following text and extract all relevant entities. Each entity should be specific and atomic, such as a Person, Location, Organization, Event, Concept, or Object.
+
     #     Allowed entities: {all_nodes}
 
     #     Guidelines:
@@ -290,7 +305,6 @@ class MemgraphMemory:
     #     }}
     #     """
 
-
     #     response = client.chat.completions.create(
     #         messages=[{"role": "user", "content": analysis_prompt}],
     #         model="gpt-4o-mini",
@@ -308,7 +322,7 @@ class MemgraphMemory:
     #         formatted_results += "\n" + "\n".join(f"- {doc}" for doc in graph_res)
 
     #     return formatted_results, response_data['response'], response_data['entities']
-    #     # 
+    #     #
     #     # return formatted_results, response_data.get('answer'), response_data.get('reasoning')
 
     def update(self, memory_id, data):
