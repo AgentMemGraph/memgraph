@@ -1,0 +1,5 @@
+graph_embedding_db/
+text_documents/
+*.pkl
+*.db
+__pycache__/
