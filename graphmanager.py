@@ -372,7 +372,7 @@ class GraphManager:
             model="gpt-4o-mini",
             response_format={"type": "json_object"}
         )
-        print(prompt, response.choices[0].message.content)
+        # print(prompt, response.choices[0].message.content)
         return json.loads(response.choices[0].message.content)
 
     # def update_graph_with_new_data(self, nodes, relationships):

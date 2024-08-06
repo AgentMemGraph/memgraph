@@ -171,24 +171,23 @@ def validate_relationships(relationships: Dict[str, Any]) -> bool:
     try:
         # Check the top-level structure
         if "relationships" not in relationships or not isinstance(relationships["relationships"], list):
-            print("its this")
+            
             return False
 
         # Validate each relationship
         for relationship in relationships["relationships"]:
             if not isinstance(relationship, dict):
-                print("no its this")
+                
                 return False
             if "source_node_id" not in relationship or \
                "target_node_id" not in relationship or \
                "type" not in relationship:
-                print(relationship)
-                print("oh no its this actually")
+                
                 return False
             if not isinstance(relationship["source_node_id"], str) or \
                not isinstance(relationship["target_node_id"], str) or \
                not isinstance(relationship["type"], str):
-                print('here')
+                
                 return False
 
         return True
@@ -274,7 +273,6 @@ def create_graph(input_text: str):
 
     )
     entities = json.loads(entities.choices[0].message.content)
-    print("ENTITIES: ", entities)
     relationships = client.chat.completions.create(
         messages=[
             {

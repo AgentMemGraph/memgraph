@@ -16,7 +16,7 @@ class MemgraphMemory:
 
         # self.graph_manager.clear_graph()
 
-    def add(self, data, user_id=None, metadata=None, update=True):
+    def add(self, data, user_id=None, metadata=None, update=False):
         """
         Add a new memory to both the vector store and the graph.
         """
@@ -45,7 +45,7 @@ class MemgraphMemory:
         self.db_manager.add_documents(
             [data], metadatas=[metadata], ids=[doc_id])
 
-        print(f"Memory with ID '{doc_id}' added successfully.")
+        # print(f"Memory with ID '{doc_id}' added successfully.")
         return doc_id
 
     def get_all(self, user_id=None):
@@ -125,8 +125,8 @@ class MemgraphMemory:
         )
         response = json.loads(response.choices[0].message.content)
         if response['response'] == 'yes':
-            print("MULTIHOP ACTIVATED")
-            print(response['entities'])
+            # print("MULTIHOP ACTIVATED")
+            # print(response['entities'])
             for entity in response['entities']:
                 graph_res.append(self.graph_manager.get_node_edges(entity))
             formatted_results = self.get_formatted_documents_and_metadatas(
@@ -167,7 +167,7 @@ class MemgraphMemory:
         )
 
         ner = json.loads(response.choices[0].message.content)['entities']
-        print('Extracted Entities:', ner)
+        # print('Extracted Entities:', ner)
 
         new_entities = [
             entity for entity in ner if entity not in used_entities]
@@ -181,7 +181,7 @@ class MemgraphMemory:
 
         formatted_results = "\n\nGraph Results:\n" + \
             "\n".join(f"- {doc}" for doc in graph_res)
-        print(f"AFTER INITIAL QUERY: {formatted_results}")
+        # print(f"AFTER INITIAL QUERY: {formatted_results}")
         analysis_prompt = f"""
             You are an AI assistant tasked with determining if more information is needed to answer a query based on provided information from a Knowledge Graph.
             The primary question is, "Do you have enough information to answer the query based on the provided information?"
@@ -222,13 +222,13 @@ class MemgraphMemory:
             response_data = json.loads(response.choices[0].message.content)
             # print(response_data)
             if response_data['response'] == 'yes' or hop == max_hops - 1:
-                print(f"Multi-hop search completed after {hop + 1} hops.")
+                # print(f"Multi-hop search completed after {hop + 1} hops.")
 
                 # return formatted_results, 'no', [], response_data['reasoning']
                 return formatted_results
 
-            print(f"HOP {hop + 1} COMPLETED - MORE INFORMATION NEEDED")
-            print("Additional entities requested:", response_data['entities'])
+            # print(f"HOP {hop + 1} COMPLETED - MORE INFORMATION NEEDED")
+            # print("Additional entities requested:", response_data['entities'])
             graph_res = []
             for entity in response_data['entities']:
                 graph_res.append(self.graph_manager.graph.nodes[entity])

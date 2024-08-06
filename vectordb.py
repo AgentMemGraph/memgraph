@@ -27,7 +27,7 @@ class ChromaDBManager:
                 metadatas=metadatas,
                 ids=ids
             )
-            print("Documents added successfully.")
+            # print("Documents added successfully.")
         except Exception as e:
             raise RuntimeError(f"Error adding documents: {e}")
 
