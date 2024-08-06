@@ -93,10 +93,12 @@ class MemgraphMemory:
         #     formatted_metadatas += f"\nUser ID: {user_id}\nEdges: {edges}\nNodes: {nodes}\n"
         return f"{formatted_documents}"
 
-    def search(self, query, user_id=None):
+    def search(self, query, user_id=None, max_hops=4):
         """
         Search for memories based on a query in the vector store.
         """
+        
+        return_result = ""
         all_nodes = list(self.graph_manager.graph.nodes)
         prompt = "You will be given a text. Extract all entites from the text. Each entity should be atomic. E.g. an entity should be a Person, a Location, so on. Here is a list of all the allowed entites you can extract:" + \
             str(all_nodes) + \
@@ -131,7 +133,115 @@ class MemgraphMemory:
                 graph_res.append(self.graph_manager.get_node_edges(entity))
             formatted_results = self.get_formatted_documents_and_metadatas(
                 results, graph_res)
+        all_nodes = list(self.graph_manager.graph.nodes)
+        graph_res = []
+        used_entities = set()
+        # Entity extraction prompt
+        entity_extraction_prompt = f"""
+            Analyze the following text and extract all relevant entities. Each entity should be specific and atomic, such as a Person, Location, Organization, Event, Concept, or Object.
+            Allowed entities: {all_nodes}
+            Previously used entities: {list(used_entities)}
+            Guidelines:
+            1. Focus on extracting entities that are directly mentioned or strongly implied in the text.
+            2. Avoid overly broad or generic terms.
+            3. Include only entities that are likely to be useful for answering the query.
+            4. If an entity is not in the allowed list but is crucial to the query, include it anyway.
+            5. Prioritize entities that haven't been used before.
+            Text: {query}
+            Provide your answer in the following JSON format:
+            {{
+                "entities": ["entity1", "entity2", ...]
+            }}
+            """
 
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "user", "content": entity_extraction_prompt}],
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"}
+        )
+
+        ner = json.loads(response.choices[0].message.content)['entities']
+        # print('Extracted Entities:', ner)
+
+        new_entities = [
+            entity for entity in ner if entity not in used_entities]
+        used_entities.update(new_entities)
+
+        for entity in new_entities:
+            if entity in self.graph_manager.graph.nodes:
+                graph_res.append(
+                    entity + ": " + str(self.graph_manager.graph.nodes[entity]))
+                graph_res.append(self.graph_manager.get_node_edges(entity))
+
+        formatted_results = "\n\nGraph Results:\n" + \
+            "\n".join(f"- {doc}" for doc in graph_res)
+        # print(f"AFTER INITIAL QUERY: {formatted_results}")
+        analysis_prompt = f"""
+            You are an AI assistant tasked with determining if more information is needed to answer a query based on provided information from a Knowledge Graph.
+            The primary question is, "Do you have enough information to answer the query based on the provided information?"
+            Query: {query}
+            Current Information: {formatted_results}
+            Allowed Entities: {all_nodes}
+            Previously Used Entities: {list(used_entities)}
+            Instructions:
+            1. Carefully analyze the query and the provided information.
+            2. Determine if you have enough information to answer the query or if more hops are needed (and allowed).
+            3. If you need additional information and more hops are allowed, specify which entities you need more details about.
+            4. Only include entities that are in the Allowed Entities list and not in the Previously Used Entities list.
+            5. If the current Information does not have enough information to answer the Query, you should request more information.
+            6. Do not use your own knowledge to try and answer the question. Ensure that if you answer 'no', the Current Information is enough to answer the Query. 
+            7. You should respond with your reasoning for your answer. This reasoning should be based on why you claim the current information can answer the query. 
+            8. You should also create a sub-query, a query which must be answered next, or a simplified version of the current query given the current information.
+            Respond in JSON format as follows:
+            9. You may not output entities that are previously used. Hence, if you believe that the information may not be present, you may answer 'yes', i.e. if you believe all relevant entities have been accessed. 
+            {{
+                "response": "yes" or "no",
+                "entities": ["entity1", "entity2", ...] (only if more information is needed, otherwise an empty list),
+                "reasoning": "Reasoning for your response
+                "sub-query": "Sub-query to be answered
+            }}
+        """
+        messages = []
+        for hop in range(max_hops):
+            # Analysis prompt
+            messages.append({"role": "user", "content": analysis_prompt})
+            response = client.chat.completions.create(
+                messages=messages,
+                model="gpt-4o-mini",
+                response_format={"type": "json_object"}
+            )
+            messages.append(
+                {"role": "assistant", "content": response.choices[0].message.content})
+            # messages.append
+            response_data = json.loads(response.choices[0].message.content)
+            # print(response_data)
+            if response_data['response'] == 'yes' or hop == max_hops - 1:
+                # print(f"Multi-hop search completed after {hop + 1} hops.")
+
+                # return formatted_results, 'no', [], response_data['reasoning']
+                return formatted_results
+
+            # print(f"HOP {hop + 1} COMPLETED - MORE INFORMATION NEEDED")
+            # print("Additional entities requested:", response_data['entities'])
+            graph_res = []
+            for entity in response_data['entities']:
+                try:
+                    graph_res.append(self.graph_manager.graph.nodes[entity])
+                except Exception as e:
+                    pass
+                graph_res.append(self.graph_manager.get_node_edges(entity))
+            formatted_results += "\n" + \
+                "\n".join(f"- {doc}" for doc in graph_res)
+            new_entities = [
+                entity for entity in response_data['entities'] if entity not in used_entities]
+            used_entities.update(new_entities)
+        graph_res = []
+        for entity in used_entities:
+            graph_res.append(self.graph_manager.graph.nodes[entity])
+        formatted_results = self.get_formatted_documents_and_metadatas(
+            results, graph_res)
+        return formatted_results, 'yes', response_data['entities'], response_data['reasoning']
         return formatted_results
 
     def search_only_graph(self, query, user_id=None, max_hops=4):
@@ -231,7 +341,10 @@ class MemgraphMemory:
             # print("Additional entities requested:", response_data['entities'])
             graph_res = []
             for entity in response_data['entities']:
-                graph_res.append(self.graph_manager.graph.nodes[entity])
+                try:
+                    graph_res.append(self.graph_manager.graph.nodes[entity])
+                except Exception as e:
+                    pass
                 graph_res.append(self.graph_manager.get_node_edges(entity))
             formatted_results += "\n" + \
                 "\n".join(f"- {doc}" for doc in graph_res)

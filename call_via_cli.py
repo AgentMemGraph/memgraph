@@ -9,7 +9,7 @@ m = MemgraphMemory()
 
 def chat_with_memory(query, chat_history):
     # Search memory
-    related_memories = m.search_only_graph(query=query, user_id="user")
+    related_memories = m.search(query=query, user_id="user")
     # print(related_memories)
     # Prepare the prompt with memory context
     prompt = f"""You are an AI assistant with access to previous conversations and related information. 
