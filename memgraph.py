@@ -4,6 +4,8 @@ import uuid
 import json
 import openai
 from openai import OpenAI
+from count_tokens.count import count_tokens_in_string
+
 client = OpenAI()
 
 
@@ -16,37 +18,44 @@ class MemgraphMemory:
 
         # self.graph_manager.clear_graph()
 
-    def add(self, data, user_id=None, metadata=None, update=False):
+
+    def add(self, data: str, user_id=None, metadata=None, update=False):
         """
         Add a new memory to both the vector store and the graph.
         """
-        # Generate a unique ID
-        doc_id = str(uuid.uuid4())
-
         # Ensure data is a string
         if not isinstance(data, str):
             raise ValueError("Data must be a string.")
+        # Split data into 2000-character segments if necessary
+        data_segments = [data[i:i+2000] for i in range(0, len(data), 2500)]
+        doc_ids = []
+        for segment in data_segments:
+            # Generate a unique ID for each segment
+            doc_id = str(uuid.uuid4())
 
-        # Add to graph
-        nodes, edges = self.graph_manager.add_documents(data, update)
+            # Add to graph
+            nodes, edges = self.graph_manager.add_documents(segment, update)
 
-        # Include nodes and edges in the metadata
-        metadata = metadata or {}
-        nodes_json = json.dumps([node.id for node in nodes])
-        edges_json = json.dumps(
-            [{'source': edge.source.id, 'target': edge.target.id, 'type': edge.type} for edge in edges])
-        metadata.update({
-            'nodes': nodes_json,
-            'edges': edges_json,
-            'user_id': user_id
-        })
+            # Include nodes and edges in the metadata
+            segment_metadata = metadata.copy() if metadata else {}
+            nodes_json = json.dumps([node.id for node in nodes])
+            edges_json = json.dumps(
+                [{'source': edge.source.id, 'target': edge.target.id, 'type': edge.type} for edge in edges])
+            segment_metadata.update({
+                'nodes': nodes_json,
+                'edges': edges_json,
+                'user_id': user_id
+            })
 
-        # Add to vector store
-        self.db_manager.add_documents(
-            [data], metadatas=[metadata], ids=[doc_id])
+            # Add to vector store
+            self.db_manager.add_documents(
+                [segment], metadatas=[segment_metadata], ids=[doc_id])
 
-        # print(f"Memory with ID '{doc_id}' added successfully.")
-        return doc_id
+            doc_ids.append(doc_id)
+
+        # print(f"Memory with ID(s) '{', '.join(doc_ids)}' added successfully.")
+        return doc_ids
+
 
     def get_all(self, user_id=None):
         """
@@ -76,13 +85,14 @@ class MemgraphMemory:
     def get_formatted_documents_and_metadatas(self, data, graph_res):
         documents = data.get('documents', [])
         metadatas = data.get('metadatas', [])
-
+        print(documents,metadatas)
         # Format documents
         formatted_documents = "Documents:\n" + \
             "\n".join(f"- {doc}" for doc in documents[0])
-
+        print("Here", formatted_documents)
         formatted_documents = formatted_documents + "\n\nGraph Results:\n" + \
             "\n".join(f"- {doc}" for doc in graph_res)
+        print("Now Here", formatted_documents)
         # Format metadatas
         # formatted_metadatas = "Metadatas:\n"
         # for metadata in metadatas[0]:
@@ -116,6 +126,7 @@ class MemgraphMemory:
 
         results = self.db_manager.query(
             query_texts=[query], n_results=10)  # Adjust n_results as needed
+        print("RESULTS", results)
         formatted_results = self.get_formatted_documents_and_metadatas(
             results, graph_res)
 
@@ -220,6 +231,8 @@ class MemgraphMemory:
                 # print(f"Multi-hop search completed after {hop + 1} hops.")
 
                 # return formatted_results, 'no', [], response_data['reasoning']
+                formatted_results = self.get_formatted_documents_and_metadatas(
+                    results, graph_res)
                 return formatted_results
 
             # print(f"HOP {hop + 1} COMPLETED - MORE INFORMATION NEEDED")
@@ -241,7 +254,8 @@ class MemgraphMemory:
             graph_res.append(self.graph_manager.graph.nodes[entity])
         formatted_results = self.get_formatted_documents_and_metadatas(
             results, graph_res)
-        return formatted_results, 'yes', response_data['entities'], response_data['reasoning']
+        print("this is the formatted results", formatted_results)
+        # return formatted_results, 'yes', response_data['entities'], response_data['reasoning']
         return formatted_results
 
     def search_only_graph(self, query, user_id=None, max_hops=4):
@@ -462,25 +476,13 @@ class MemgraphMemory:
         # self.graph_manager.graph.remove_node(memory_id)
         print(f"Memory with ID '{memory_id}' deleted successfully.")
 
-    def delete_all(self, user_id=None):
+    def reset(self):
         """
         Delete all memories from both the vector store and the graph.
         """
         # Delete from vector store
-        raise NotImplementedError
-        all_ids = self.db_manager.collection.get_all_ids()
-        for doc_id in all_ids:
-            self.db_manager.delete_document(doc_id)
-
-        # Delete from graph
+        # raise NotImplementedError
+        self.db_manager.delete_all()
         self.graph_manager.clear_graph()
         print(f"All memories deleted.")
 
-    def reset(self):
-        """
-        Reset all memories in both the vector store and the graph.
-        """
-        # self.delete_all()
-        raise NotImplementedError
-        self.db_manager.delete_all()
-        print("All memories have been reset.")

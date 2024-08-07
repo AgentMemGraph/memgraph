@@ -1,22 +1,29 @@
+from openai import OpenAI
+from pprint import pprint
+from termcolor import colored, cprint
+import sys
 from datasets import load_dataset
 from memgraph import MemgraphMemory
 m = MemgraphMemory()
-from pprint import pprint
-from openai import OpenAI
+
+
 client = OpenAI()
 
 
-ds = load_dataset("lucadiliello/hotpotqa")
-train_ds = ds["train"]
-for i in range(40,50):
-    m.graph_manager.clear_graph()
+ds = load_dataset("dgslibisey/MuSiQue")
+train_ds = ds["validation"]
+for i in range(50, 60):
+    m.reset()
     question = train_ds[i]["question"]
-    context = train_ds[i]["context"]
-    answers = train_ds[i]["answers"]
+    context = train_ds[i]["paragraphs"]
+
+    for paragraph in context:
+        doc_id = m.add(paragraph['title'] + "\n" + paragraph['paragraph_text'], user_id="gabe",
+                       metadata={}, update=False)
+    answer = train_ds[i]["answer"]
     print(f"Question: {question}")
-    print(f"Context: {context}")
-    print(f"Answers: {answers}")
-    doc_id = m.add(context, user_id="gabe", metadata={}, update = False)
+    # print(f"Context: {total_context}")
+    # doc_id = m.add(total_context, user_id="gabe", metadata={}, update=False)
     print(f"Stored memory ID: {doc_id}")
     print("All Relationships: \n")
     all_relationships = m.graph_manager.get_all_relationships()
@@ -27,17 +34,20 @@ for i in range(40,50):
     prompt = (
         f"You are given a query and information that can be used to answer the query. Answer the Query. There are also a set of Entity Triplets given. Use those to make inferences. The answer may not be direct. Do not use your own knowledge, only use answer using the Information provided. If the answer is not presnt in the information provided, output 'Not Enough Information' \n Query: {question} \n Information: {related_memories1} Answer: ")
 
-
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": prompt},
         ]
     )
-    print(response.choices[0].message.content)
+    print("====== IMPORTANT ========")
+    # print(f"Answer: {answer}")
+    cprint(f"Answer: {answer}", "red")
+    cprint(response.choices[0].message.content, "red")
+    # print(response.choices[0].message.content)
     print("=====================================================")
     print()
-    
+
 # Store a Memory
 # Adding all texts to the memory store
 # texts = [

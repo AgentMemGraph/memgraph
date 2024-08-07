@@ -14,6 +14,7 @@ from chromadb.config import Settings
 import hashlib
 import json
 from create_kg import create_graph
+from typing import List, Tuple, Union
 
 class Node:
     def __init__(self, id, node_type):
@@ -70,18 +71,28 @@ class GraphManager:
 
     def clear_graph(self):
         """
-        Clears all nodes and edges from the graph.
+        Clears all nodes and edges from the graph and deletes the graph file.
         """
+        # Clear the in-memory graph
         self.graph.clear()
+
+        # Clear the embeddings in ChromaDB
         self.chroma_client.delete_collection('node_embeddings')
         self.chroma_client.delete_collection('relationship_embeddings')
         self.node_collection = self.chroma_client.get_or_create_collection(
             "node_embeddings")
         self.relationship_collection = self.chroma_client.get_or_create_collection(
             "relationship_embeddings")
+
+        # Delete the graph file if it exists
+        if os.path.exists(self.filename):
+            os.remove(self.filename)
+            print(f"Graph file '{self.filename}' has been deleted.")
+
         print("Graph has been cleared.")
 
-    def add_documents(self, documents, update = True):
+
+    def add_documents(self, documents: List[str], update = True):
         """
         Converts documents to graph nodes and relationships.
         """
@@ -124,7 +135,9 @@ class GraphManager:
         # graph_documents = self.llm_transformer.convert_to_graph_documents(
         #     documents)
         # return graph_documents[0].nodes, graph_documents[0].relationships
-        nodes, relationships = create_graph(text)
+        print('NODES', self.get_all_nodes())
+        all_entities = self.get_all_nodes()
+        nodes, relationships = create_graph(text, all_entities= all_entities)
         return nodes, relationships
         
 
@@ -640,10 +653,12 @@ class GraphManager:
         incoming_edges = [(source, node_id, data)
                           for source, data in self.graph.pred[node_id].items()]
 
+        print("LENGTH OF INCOMING EDGES",len(incoming_edges))
+        
         # Combine both outgoing and incoming edges
         all_edges = outgoing_edges + incoming_edges
-
-        return all_edges
+        print(self.convert_to_relationship_format(all_edges))
+        return self.convert_to_relationship_format(all_edges)
 
     def get_edge_between_nodes(self, source_node, target_node):
         """
@@ -658,6 +673,32 @@ class GraphManager:
             return (source_node, target_node, {'type': edge_data.get('type', 'unknown')})
         else:
             return None
+    
+    def convert_to_relationship_format(self,data: Union[Tuple[str, str, any], List[Tuple[str, str, any]]]) -> List[Tuple[str, str, str]]:
+        def process_tuple(tpl: Tuple[str, str, any]) -> List[Tuple[str, str, str]]:
+            head, tail, relationships = tpl
+            return [(head, rel['type'], tail) for _, rel in relationships.items()]
+
+        # Check if data is a list of tuples or a single tuple
+        if isinstance(data, list):
+            # Process each tuple in the list
+            result = []
+            for tpl in data:
+                result.extend(process_tuple(tpl))
+            return result
+        elif isinstance(data, tuple):
+            # Process the single tuple
+            return process_tuple(data)
+        else:
+            raise ValueError("Input must be a tuple or a list of tuples")
+
+
+    def get_all_nodes(self):
+        """
+        Retrieves all nodes in the graph.
+        """
+        return list(self.graph.nodes(data = True))
+
 
 
 # Example usage:

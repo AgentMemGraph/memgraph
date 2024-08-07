@@ -256,7 +256,7 @@ relationships_json = {
     ]
 }
 
-def create_graph(input_text: str): 
+def create_graph(input_text: str, all_entities: []): 
     entities = client.chat.completions.create(
         messages=[
             {
@@ -265,12 +265,11 @@ def create_graph(input_text: str):
             },
             {
                 "role": "user",
-                "content": f"Tip: Make sure to answer in the correct format and do not include any explanations. Use the given format to extract information from the following input: {input_text}"
+                "content": f"Tip: Make sure to answer in the correct format and do not include any explanations. Here is a list of all previous entities identified: {all_entities} . Use the given format to extract information from the following input: {input_text}"
             }
         ],
         model="gpt-4o-mini",
         response_format={"type": "json_object"},
-
     )
     entities = json.loads(entities.choices[0].message.content)
     relationships = client.chat.completions.create(
@@ -303,3 +302,6 @@ def create_graph(input_text: str):
 
 # raw_schema = cast(Dict[Any, Any], response)
 # nodes, relationships = _convert_to_graph_document(raw_schema)
+# text = 'The Loco-Motion\" is a 1962 pop song written by American songwriters Gerry Goffin and Carole King.'
+# nodes, relationships = create_graph(text,[])
+# print(nodes,relationships)

@@ -1,5 +1,6 @@
 import chromadb
-
+from openai import OpenAI
+client = OpenAI()
 
 class ChromaDBManager:
     def __init__(self, collection_name):
@@ -7,10 +8,24 @@ class ChromaDBManager:
         self.client = chromadb.PersistentClient(path="text_documents/")
         self.collection_name = collection_name
         self.collection = self._get_or_create_collection()
-        
+    
+    def get_memory_prompt(self,user_input,metadata: ""):
+        MEMORY_DEDUCTION_PROMPT = f"""
+            Deduce the facts, preferences, and memories from the provided text.
+            Just return the facts, preferences, and memories in bullet points:
+            Natural language text: {user_input}
+            User/Agent details: {metadata}
+
+            Constraint for deducing facts, preferences, and memories:
+            - The facts, preferences, and memories should be concise and informative.
+
+            Deduced facts, preferences, and memories:
+        """
+        return MEMORY_DEDUCTION_PROMPT
 
     def get_client(self):
         return self.client
+
     def _get_or_create_collection(self):
         try:
             # Attempt to get the collection, create it if it does not exist
@@ -22,6 +37,7 @@ class ChromaDBManager:
 
     def add_documents(self, documents, metadatas=None, ids=None):
         try:
+            documents = self.parse_document_for_memory(documents, metadatas)
             self.collection.add(
                 documents=documents,
                 metadatas=metadatas,
@@ -30,6 +46,23 @@ class ChromaDBManager:
             # print("Documents added successfully.")
         except Exception as e:
             raise RuntimeError(f"Error adding documents: {e}")
+    
+    def parse_document_for_memory(self, documents, metadatas):
+        """
+        Uses the openai api and the memory deduction prompt to return memories (string)
+        """
+        memories = []
+        print("INPUT DOCUMENTS",documents)
+        for document, metadata in zip(documents, metadatas):
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": self.get_memory_prompt(document,metadata)},
+                ]
+            )
+            memories.append(response.choices[0].message.content)
+        print("OUTPUT MEMORIES", memories)
+        return memories
 
     def update_document(self, doc_id, document, metadata=None):
         try:
@@ -70,7 +103,7 @@ class ChromaDBManager:
     def get_document_by_id(self, doc_id):
         try:
             # Query by ID
-            results = self.collection.get(ids = [doc_id])
+            results = self.collection.get(ids=[doc_id])
             return results
         except Exception as e:
             raise RuntimeError(f"Error retrieving document by ID: {e}")
@@ -82,7 +115,7 @@ class ChromaDBManager:
             return documents
         except Exception as e:
             raise RuntimeError(f"Error retrieving all documents: {e}")
-        
+
     def delete_all(self):
         try:
             # Delete all documents
@@ -90,7 +123,8 @@ class ChromaDBManager:
             self.collection = self._get_or_create_collection()
         except Exception as e:
             raise RuntimeError(f"Error deleting all documents: {e}")
-        
+
+
 # Example usage:
 if __name__ == "__main__":
     manager = ChromaDBManager("all-my-documents")
